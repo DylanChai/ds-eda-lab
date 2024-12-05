@@ -1,41 +1,27 @@
-/* eslint-disable import/extensions, import/no-absolute-path */
 import { SQSHandler } from "aws-lambda";
-import {
-  GetObjectCommand,
-  PutObjectCommandInput,
-  GetObjectCommandInput,
-  S3Client,
-  PutObjectCommand,
-} from "@aws-sdk/client-s3";
+import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 
-const s3 = new S3Client();
+const ddbClient = new DynamoDBClient({ region: process.env.REGION });
 
 export const handler: SQSHandler = async (event) => {
-  console.log("Event ", JSON.stringify(event));
   for (const record of event.Records) {
-    const recordBody = JSON.parse(record.body);        // Parse SQS message
-    const snsMessage = JSON.parse(recordBody.Message); // Parse SNS message
+    const body = JSON.parse(record.body);
+    const message = JSON.parse(body.Message);
+    const s3Event = message.Records[0];
+    const bucketName = s3Event.s3.bucket.name;
+    const key = decodeURIComponent(s3Event.s3.object.key.replace(/\+/g, " "));
 
-    if (snsMessage.Records) {
-      console.log("Record body ", JSON.stringify(snsMessage));
-      for (const messageRecord of snsMessage.Records) {
-        const s3e = messageRecord.s3;
-        const srcBucket = s3e.bucket.name;
-        // Object key may have spaces or unicode non-ASCII characters.
-        const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
-        let origimage = null;
-        try {
-          // Download the image from the S3 source bucket.
-          const params: GetObjectCommandInput = {
-            Bucket: srcBucket,
-            Key: srcKey,
-          };
-          origimage = await s3.send(new GetObjectCommand(params));
-          // Process the image ......
-        } catch (error) {
-          console.log(error);
-        }
-      }
+    const fileType = key.split('.').pop()?.toLowerCase();
+    if (fileType === "jpeg" || fileType === "png") {
+      // Save to DynamoDB
+      await ddbClient.send(
+        new PutItemCommand({
+          TableName: process.env.TABLE_NAME,
+          Item: { ImageName: { S: key } },
+        })
+      );
+    } else {
+      console.log(`Invalid file type: ${fileType}`);
     }
   }
 };

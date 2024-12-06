@@ -1,61 +1,47 @@
 import { SQSHandler } from "aws-lambda";
-import { SESClient, SendEmailCommand, SendEmailCommandInput } from "@aws-sdk/client-ses";
+import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 
-// Initialize the SES client
-const ses = new SESClient({ region: process.env.AWS_REGION || "eu-west-1" });
+const ses = new SESClient({ region: process.env.SES_REGION });
 
-// Lambda handler
 export const handler: SQSHandler = async (event) => {
-  console.log("Processing rejection messages...");
+  console.log("Rejection Handler Event: ", JSON.stringify(event));
+
+  const toAddress = process.env.SES_EMAIL_TO;
+  const fromAddress = process.env.SES_EMAIL_FROM;
+
+  if (!toAddress || !fromAddress) {
+    console.error("Email addresses are not set in environment variables.");
+    return;
+  }
 
   for (const record of event.Records) {
+    const recordBody = JSON.parse(record.body);
+    console.log("Parsed record body:", recordBody);
+
+    const errorMessage = recordBody.errorMessage || "Invalid file type";
+
+    const emailParams = {
+      Destination: {
+        ToAddresses: [toAddress],
+      },
+      Message: {
+        Body: {
+          Text: {
+            Data: `Your file upload was rejected due to the following reason: ${errorMessage}`,
+          },
+        },
+        Subject: {
+          Data: "File Upload Rejected",
+        },
+      },
+      Source: fromAddress,
+    };
+
     try {
-      // Parse the message from the DLQ
-      const message = JSON.parse(record.body);
-      const bucket = message.bucket || "Unknown Bucket";
-      const key = message.key || "Unknown File";
-
-      // Compose rejection email
-      const emailParams: SendEmailCommandInput = {
-        Destination: {
-          ToAddresses: [process.env.SES_EMAIL_TO || ""], // Recipient email
-        },
-        Message: {
-          Body: {
-            Text: {
-              Charset: "UTF-8",
-              Data: `Your upload (${key}) was rejected because it is not a valid image file type. Accepted types are .jpeg and .png.`,
-            },
-            Html: {
-              Charset: "UTF-8",
-              Data: `
-                <html>
-                  <body>
-                    <h3>Image Upload Rejection</h3>
-                    <p>Unfortunately, your upload was rejected.</p>
-                    <ul>
-                      <li><strong>Bucket:</strong> ${bucket}</li>
-                      <li><strong>File:</strong> ${key}</li>
-                    </ul>
-                    <p><em>Reason: Invalid file type. Accepted types are .jpeg and .png.</em></p>
-                  </body>
-                </html>
-              `,
-            },
-          },
-          Subject: {
-            Charset: "UTF-8",
-            Data: "Image Upload Rejection",
-          },
-        },
-        Source: process.env.SES_EMAIL_FROM || "", // Sender email
-      };
-
-      // Send the email using SES
       await ses.send(new SendEmailCommand(emailParams));
-      console.log(`Rejection email sent for ${key}`);
-    } catch (error) {
-      console.error("Error processing DLQ message:", error);
+      console.log("Rejection email sent.");
+    } catch (err) {
+      console.error("Error sending rejection email:", err);
     }
   }
 };

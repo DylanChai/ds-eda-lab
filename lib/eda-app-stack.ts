@@ -20,7 +20,7 @@ export class EDAAppStack extends cdk.Stack {
       tableName: "Images",
       partitionKey: { name: "ImageName", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // Use RETAIN in production
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // S3 Bucket
@@ -50,15 +50,22 @@ export class EDAAppStack extends cdk.Stack {
       displayName: "New Image Topic",
     });
 
-    // Lambda Functions
+    // SNS Filtering Policy for Metadata Updates
+    const metadataFilterPolicy = {
+      metadata_type: sns.SubscriptionFilter.stringFilter({
+        allowlist: ["Caption", "Date", "Photographer"],
+      }),
+    };
+
     const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
       runtime: lambda.Runtime.NODEJS_18_X,
       entry: `${__dirname}/../lambdas/processImage.ts`,
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
       environment: {
-        TABLE_NAME: "Images",
+        TABLE_NAME: imagesTable.tableName,
         REGION: "eu-west-1",
+        DLQ_URL: deadLetterQueue.queueUrl,
       },
     });
 
@@ -67,6 +74,11 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/mailer.ts`,
       timeout: cdk.Duration.seconds(5),
       memorySize: 512,
+      environment: {
+        SES_EMAIL_TO: "20099297@mail.wit.ie",
+        SES_EMAIL_FROM: "20099297@mail.wit.ie",
+        SES_REGION: "eu-west-1",
+      },
     });
 
     const rejectionMailerFn = new lambdanode.NodejsFunction(this, "RejectionMailerFn", {
@@ -74,6 +86,22 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/rejectionMailer.ts`,
       timeout: cdk.Duration.seconds(5),
       memorySize: 512,
+      environment: {
+        SES_EMAIL_TO: "20099297@mail.wit.ie",
+        SES_EMAIL_FROM: "20099297@mail.wit.ie",
+        SES_REGION: "eu-west-1",
+      },
+    });
+
+    const updateMetadataFn = new lambdanode.NodejsFunction(this, "UpdateMetadataFn", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: `${__dirname}/../lambdas/updateMetadata.ts`,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      environment: {
+        TABLE_NAME: imagesTable.tableName,
+        REGION: "eu-west-1",
+      },
     });
 
     // S3 --> SNS Notification
@@ -83,17 +111,26 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     // SNS --> SQS Subscriptions
-    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(imageProcessQueue, {
+        filterPolicy: metadataFilterPolicy,
+      })
+    );
     newImageTopic.addSubscription(new subs.SqsSubscription(mailerQueue));
 
     // SQS --> Lambda Event Sources
     processImageFn.addEventSource(new events.SqsEventSource(imageProcessQueue));
     mailerFn.addEventSource(new events.SqsEventSource(mailerQueue));
-    rejectionMailerFn.addEventSource(new events.SqsEventSource(mailerQueue));
+    rejectionMailerFn.addEventSource(new events.SqsEventSource(deadLetterQueue));
+    updateMetadataFn.addEventSource(new events.SqsEventSource(imageProcessQueue));
 
     // Permissions
     imagesBucket.grantRead(processImageFn);
     imagesTable.grantReadWriteData(processImageFn);
+    imagesTable.grantReadWriteData(updateMetadataFn);
+
+    // Grant SQS permissions to ProcessImageFn for DLQ
+    deadLetterQueue.grantSendMessages(processImageFn);
 
     mailerFn.addToRolePolicy(
       new iam.PolicyStatement({
